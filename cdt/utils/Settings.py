@@ -62,7 +62,8 @@ class CGNNSettings(object):
                  "nb_vectors_approx_MMD",
                  "complexity_graph_param",
                  "max_nb_points",
-                 "max_parents_block")
+                 "max_parents_block",
+                 "asymmetry_param")
 
     def __init__(self):
         super(CGNNSettings, self).__init__()
@@ -71,7 +72,7 @@ class CGNNSettings(object):
         self.learning_rate = 0.01
         self.init_weights = 0.05
         self.max_nb_points = 1500
-        self.h_layer_dim = 30
+        self.h_layer_dim = 40
         self.use_Fast_MMD = False
         self.nb_vectors_approx_MMD = 100
 
@@ -89,6 +90,7 @@ class CGNNSettings(object):
 
         # specific for blockwise CGNN
         self.max_parents_block = 5
+        self.asymmetry_param = 0.0001
 
 
 def autoset_settings(set_var):
