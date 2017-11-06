@@ -177,7 +177,9 @@ class CGNN_all_blocks(object):
 
         self.run = run
 
-        list_nodes = umg.list_nodes()
+        self.list_nodes = df_data.columns
+
+        print(self.list_nodes)
 
         data = df_data.as_matrix()
         data = data.reshape(data.shape[0], data.shape[1])
@@ -189,15 +191,11 @@ class CGNN_all_blocks(object):
         G_dist_loss = 0
         self.dict_all_W_in = {}
 
-        for target in list_nodes:
+        penalty_edge = 0
+
+        for target in self.list_nodes:
 
             num_target = int(target[1:])
-
-            list_neighbours = umg.neighbors(target)
-
-            list_num_neighbours = []
-            for node in list_neighbours:
-                list_num_neighbours.append(int(node[1:]))
 
             list_all_other_variables = list(df_data.columns.values)
             list_all_other_variables.remove(target)
@@ -206,6 +204,14 @@ class CGNN_all_blocks(object):
             for node in list_all_other_variables:
                 list_num_all_other_variables.append(int(node[1:]))
 
+            if umg is not None:
+                list_neighbours = umg.neighbors(target)
+            else:
+                list_neighbours = list(list_all_other_variables)
+
+            list_num_neighbours = []
+            for node in list_neighbours:
+                list_num_neighbours.append(int(node[1:]))
             all_neighbour_variables = tf.transpose(
                 tf.gather(tf.transpose(self.all_variables), np.array(list_num_neighbours)))
 
@@ -219,17 +225,21 @@ class CGNN_all_blocks(object):
             list_W_in = []
             dict_target_W_in = {}
             for node in list_neighbours:
-                W_in = tf.Variable(init([1, CGNN_SETTINGS.h_layer_dim]))
-                dict_target_W_in[node] = tf.reduce_sum(tf.abs(W_in))
+                W_in = tf.Variable(init([1, h_layer_dim]))
+                coeff = tf.reduce_sum(tf.abs(W_in))
+                dict_target_W_in[node] = coeff
                 list_W_in.append(W_in)
+
+                if umg is None:
+                    penalty_edge += CGNN_SETTINGS.regul_param * coeff
 
             self.dict_all_W_in[target] = dict_target_W_in
 
-            W_noise = tf.Variable(init([1, CGNN_SETTINGS.h_layer_dim]))
+            W_noise = tf.Variable(init([1, h_layer_dim]))
             W_input = tf.concat([tf.concat(list_W_in, 0), W_noise], 0)
 
-            b_in = tf.Variable(init([CGNN_SETTINGS.h_layer_dim]))
-            W_out = tf.Variable(init([CGNN_SETTINGS.h_layer_dim, 1]))
+            b_in = tf.Variable(init([h_layer_dim]))
+            W_out = tf.Variable(init([h_layer_dim, 1]))
             b_out = tf.Variable(init([1]))
 
             input = tf.concat(
@@ -247,12 +257,19 @@ class CGNN_all_blocks(object):
 
         asymmetry_constraint = 0
 
-        for edge in umg.list_edges():
-            asymmetry_constraint += CGNN_SETTINGS.asymmetry_param * \
-                self.dict_all_W_in[edge[0]][edge[1]] * \
-                self.dict_all_W_in[edge[1]][edge[0]]
+        if umg is not None:
+            for edge in umg.list_edges():
+                asymmetry_constraint += CGNN_SETTINGS.asymmetry_param * self.dict_all_W_in[edge[0]][edge[1]] * \
+                    self.dict_all_W_in[edge[1]][edge[0]]
+        else:
+            for node1 in self.list_nodes:
+                for node2 in self.list_nodes:
+                    if(node1 != node2):
+                        print(node1 + " - " + node2)
+                        asymmetry_constraint += CGNN_SETTINGS.asymmetry_param * self.dict_all_W_in[node1][node2] * \
+                            self.dict_all_W_in[node2][node1]
 
-        self.G_global_loss = G_dist_loss + asymmetry_constraint
+        self.G_global_loss = G_dist_loss + asymmetry_constraint + penalty_edge
 
         self.G_solver = (tf.train.AdamOptimizer(
             learning_rate=learning_rate).minimize(self.G_global_loss))
@@ -292,7 +309,7 @@ class CGNN_all_blocks(object):
         """
         test_epochs = kwargs.get('test_epochs', CGNN_SETTINGS.test_epochs)
 
-        nb_nodes = len(umg.list_nodes())
+        nb_nodes = len(self.list_nodes)
         matrix_results = np.zeros((nb_nodes, nb_nodes))
 
         for it in range(test_epochs):
@@ -305,15 +322,19 @@ class CGNN_all_blocks(object):
                     print('Run:{}, Iter:{}, score:{}'.format(
                         self.run, it, G_global_loss_curr))
 
-            for edge in umg.list_edges():
+            if umg is not None:
+                for edge in umg.list_edges():
+                    matrix_results[int(edge[0][1:]), int(
+                        edge[1][1:])] += dict_all_W_in_curr[edge[1]][edge[0]]
+                    matrix_results[int(edge[1][1:]), int(
+                        edge[0][1:])] += dict_all_W_in_curr[edge[0]][edge[1]]
 
-                # print(edge[0] + " -> " + edge[1] + " : " + str(dict_all_W_in_curr[edge[1]][edge[0]]))
-                # print(edge[1] + " -> " + edge[0] + " : " + str(dict_all_W_in_curr[edge[0]][edge[1]]))
-
-                matrix_results[int(edge[0][1:]), int(
-                    edge[1][1:])] += dict_all_W_in_curr[edge[1]][edge[0]]
-                matrix_results[int(edge[1][1:]), int(
-                    edge[0][1:])] += dict_all_W_in_curr[edge[0]][edge[1]]
+            else:
+                for node1 in self.list_nodes:
+                    for node2 in self.list_nodes:
+                        if (node1 != node2):
+                            matrix_results[int(node1[1:]), int(
+                                node2[1:])] += dict_all_W_in_curr[node2][node1]
 
         tf.reset_default_graph()
 
@@ -506,7 +527,7 @@ def eval_all_possible_blocks(data, type_variables, umg, run_cgnn_function, **kwa
         result_block = Parallel(n_jobs=nb_jobs)(delayed(run_cgnn_function)(
             data, type_variables, umg, block.parents, block.node, block.idx, run, **kwargs) for run in range(nb_runs))
         block.score = np.mean([i for i in result_block if np.isfinite(i)])
-        #block.score = random.random()
+        # block.score = random.random()
 
     file = open("save_block.csv", "w")
     for block in list_block:
@@ -653,7 +674,7 @@ def run_CGNN_all_blocks(df_data, umg, run, **kwargs):
     return matrix_result
 
 
-def embedded_method(data, umg, **kwargs):
+def embedded_method(data, umg=None, **kwargs):
 
     list_nodes = list(data.columns.values)
     matrix_results = np.zeros((len(list_nodes), len(list_nodes)))
@@ -668,14 +689,26 @@ def embedded_method(data, umg, **kwargs):
 
     dag = DirectedGraph()
 
-    for edge in umg.list_edges():
+    if umg is not None:
+        for edge in umg.list_edges():
 
-        score_edge = matrix_results[int(edge[0][1:]), int(
-            edge[1][1:])] - matrix_results[int(edge[1][1:]), int(edge[0][1:])]
-        if(score_edge > 0):
-            dag.add(edge[0], edge[1], score_edge)
-        else:
-            dag.add(edge[1], edge[0], -score_edge)
+            score_edge = matrix_results[int(edge[0][1:]), int(
+                edge[1][1:])] - matrix_results[int(edge[1][1:]), int(edge[0][1:])]
+            if(score_edge > 0):
+                dag.add(edge[0], edge[1], score_edge)
+            else:
+                dag.add(edge[1], edge[0], -score_edge)
+    else:
+        for node1 in list_nodes:
+            for node2 in list_nodes:
+                if (node1 != node2):
+                    score_edge = matrix_results[int(node1[1:]), int(
+                        node2[1:])] - matrix_results[int(node2[1:]), int(node1[1:])]
+                    print(node1 + node2 + " : " + str(score_edge))
+                    if (score_edge > 0):
+                        dag.add(node1, node2, score_edge)
+                    else:
+                        dag.add(node2, node1, -score_edge)
 
     return dag
 
@@ -724,9 +757,8 @@ class CGNN_decomposable(GraphModel):
             print('No backend known as {}'.format(self.backend))
             raise ValueError
 
-    def create_graph_from_data(self, data):
-        print("The CGNN model is not able (yet?) to model the graph directly from raw data")
-        raise ValueError
+    def create_graph_from_data(self, data, **kwargs):
+        return embedded_method(data, **kwargs)
 
     def orient_directed_graph(self, data, type_variables, dag, alg='HC', **kwargs):
         """ Improve a directed acyclic graph using CGNN
