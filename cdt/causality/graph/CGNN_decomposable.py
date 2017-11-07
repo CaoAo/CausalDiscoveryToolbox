@@ -41,7 +41,7 @@ def init(size, **kwargs):
 
 
 class CGNN_decomposable_tf(object):
-    def __init__(self, N,  n_target, n_parents, n_all_other_variables, run, idx, **kwargs):
+    def __init__(self, N,  n_target, n_parents, n_all_other_variables, run=0, idx=0, **kwargs):
         """ Build the tensorflow graph of the CGNN structure
 
         :param N: Number of points
@@ -106,7 +106,7 @@ class CGNN_decomposable_tf(object):
         self.sess = tf.Session(config=config)
         self.sess.run(tf.global_variables_initializer())
 
-    def train(self, data_target, data_all_other_variables, data_parents, verbose=True, **kwargs):
+    def train(self, data_target, data_all_other_variables, data_parents, verbose=SETTINGS.verbose, **kwargs):
         """ Train the initialized model
 
         :param data: data corresponding to the graph
@@ -129,7 +129,7 @@ class CGNN_decomposable_tf(object):
                           format(self.idx, self.run,
                                  it, G_dist_loss_xcausesy_curr))
 
-    def evaluate(self, data_target, data_all_other_variables, data_parents, verbose=True, **kwargs):
+    def evaluate(self, data_target, data_all_other_variables, data_parents, verbose=SETTINGS.verbose, **kwargs):
         """ Test the model
 
         :param data: data corresponding to the graph
@@ -166,7 +166,7 @@ class CGNN_decomposable_tf(object):
 
 class CGNN_all_blocks(object):
 
-    def __init__(self, df_data, umg, run, **kwargs):
+    def __init__(self, df_data, umg=None, run=0, **kwargs):
 
         learning_rate = kwargs.get(
             'learning_rate', CGNN_SETTINGS.learning_rate)
@@ -176,10 +176,7 @@ class CGNN_all_blocks(object):
             'nb_vectors_approx_MMD', CGNN_SETTINGS.nb_vectors_approx_MMD)
 
         self.run = run
-
         self.list_nodes = df_data.columns
-
-        print(self.list_nodes)
 
         data = df_data.as_matrix()
         data = data.reshape(data.shape[0], data.shape[1])
@@ -187,43 +184,32 @@ class CGNN_all_blocks(object):
 
         self.all_variables = tf.placeholder(
             tf.float32, shape=[None, df_data.shape[1]])
+        self.variables = {}
+        for idx, node in enumerate(self.list_nodes):
+            self.all_variables[node] = self.all_variables[:, idx]
 
         G_dist_loss = 0
         self.dict_all_W_in = {}
-
         penalty_edge = 0
 
         for target in self.list_nodes:
 
-            num_target = int(target[1:])
-
-            list_all_other_variables = list(df_data.columns.values)
-            list_all_other_variables.remove(target)
-
-            list_num_all_other_variables = []
-            for node in list_all_other_variables:
-                list_num_all_other_variables.append(int(node[1:]))
-
+            list_all_other_variables = [
+                i for i in self.list_nodes if i != target]
             if umg is not None:
                 list_neighbours = umg.neighbors(target)
             else:
                 list_neighbours = list(list_all_other_variables)
 
-            list_num_neighbours = []
-            for node in list_neighbours:
-                list_num_neighbours.append(int(node[1:]))
-            all_neighbour_variables = tf.transpose(
-                tf.gather(tf.transpose(self.all_variables), np.array(list_num_neighbours)))
-
-            target_variable = tf.transpose(
-                tf.gather(tf.transpose(self.all_variables), num_target))
-            target_variable = tf.reshape(target_variable, [N, 1])
-
-            all_other_variables = tf.transpose(tf.gather(tf.transpose(
-                self.all_variables), np.array(list_num_all_other_variables)))
+            target_variable = tf.reshape(self.variables[target], [N, 1])
+            all_neighbour_variables = tf.stack(
+                [self.variables[i] for i in list_neighbours], axis=1)
+            all_other_variables = tf.stack(
+                [self.variables[i] for i in list_all_other_variables], axis=1)
 
             list_W_in = []
             dict_target_W_in = {}
+
             for node in list_neighbours:
                 W_in = tf.Variable(init([1, h_layer_dim]))
                 coeff = tf.reduce_sum(tf.abs(W_in))
@@ -235,39 +221,37 @@ class CGNN_all_blocks(object):
 
             self.dict_all_W_in[target] = dict_target_W_in
 
-            W_noise = tf.Variable(init([1, h_layer_dim]))
-            W_input = tf.concat([tf.concat(list_W_in, 0), W_noise], 0)
+            W_input = tf.concat([tf.concat(list_W_in, 0),
+                                 tf.Variable(init([1, h_layer_dim]))], 0)
 
             b_in = tf.Variable(init([h_layer_dim]))
             W_out = tf.Variable(init([h_layer_dim, 1]))
             b_out = tf.Variable(init([1]))
 
-            input = tf.concat(
+            inputx = tf.concat(
                 [all_neighbour_variables, tf.random_normal([N, 1], mean=0, stddev=1)], 1)
-            output = tf.nn.relu(tf.matmul(input, W_input) + b_in)
+            output = tf.nn.relu(tf.matmul(inputx, W_input) + b_in)
             output = tf.matmul(output, W_out) + b_out
             output = tf.reshape(output, [N, 1])
 
             if (use_Fast_MMD):
-                G_dist_loss += Fourier_MMD_Loss_tf(tf.concat([tf.concat(all_other_variables, 1), target_variable], 1), tf.concat([
-                                                   tf.concat(all_other_variables, 1), output], 1), nb_vectors_approx_MMD)
+                G_dist_loss += Fourier_MMD_Loss_tf(tf.concat([tf.concat(all_other_variables, 1), target_variable], 1),
+                                                   tf.concat([tf.concat(all_other_variables, 1), output], 1), nb_vectors_approx_MMD)
             else:
-                G_dist_loss += MMD_loss_tf(tf.concat([tf.concat(all_other_variables, 1), target_variable], 1), tf.concat(
-                    [tf.concat(all_other_variables, 1), output], 1))
+                G_dist_loss += MMD_loss_tf(tf.concat([tf.concat(all_other_variables, 1), target_variable], 1),
+                                           tf.concat([tf.concat(all_other_variables, 1), output], 1))
 
         asymmetry_constraint = 0
 
         if umg is not None:
             for edge in umg.list_edges():
-                asymmetry_constraint += CGNN_SETTINGS.asymmetry_param * self.dict_all_W_in[edge[0]][edge[1]] * \
+                asymmetry_constraint += CGNN_SETTINGS.asymmetry_param * \
+                    self.dict_all_W_in[edge[0]][edge[1]] * \
                     self.dict_all_W_in[edge[1]][edge[0]]
         else:
-            for node1 in self.list_nodes:
-                for node2 in self.list_nodes:
-                    if(node1 != node2):
-                        print(node1 + " - " + node2)
-                        asymmetry_constraint += CGNN_SETTINGS.asymmetry_param * self.dict_all_W_in[node1][node2] * \
-                            self.dict_all_W_in[node2][node1]
+            asymmetry_constraint += CGNN_SETTINGS.asymmetry_param * \
+                np.sum([self.dict_all_W_in[i][j] for i in self.list_nodes
+                        for j in self.list_nodes if i != j])
 
         self.G_global_loss = G_dist_loss + asymmetry_constraint + penalty_edge
 
